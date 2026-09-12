@@ -53,9 +53,10 @@ public partial class MapGenerator : Node2D
 
     private class BattleState
     {
-        public Army Defender;
         public List<Army> Attackers = new();
-        public int DefenderStartHp = 100;
+        public List<Army> Defenders = new();
+        public Dictionary<int, int> DefenderStartHp = new();
+        public int RegionId = -1;
     }
 
     private Dictionary<int, BattleState> _activeBattles = new();
@@ -304,43 +305,44 @@ public partial class MapGenerator : Node2D
                         continue;
                     }
 
-                    if (enemy.IsWounded)
-                    {
-                        _armyMoveTimers[armyId] = GetMoveDelay(armyId);
-
-                        if (_activeBattles.ContainsKey(enemy.Id))
-                        {
-                            _activeBattles[enemy.Id].Attackers.Add(army);
-                            _armiesInBattle.Add(armyId);
-                            _armiesInBattle.Add(enemy.Id);
-                        }
-                        else
-                        {
-                            var state = new BattleState { Defender = enemy };
-                            state.Attackers.Add(army);
-                            _activeBattles[enemy.Id] = state;
-                            _armiesInBattle.Add(armyId);
-                            _armiesInBattle.Add(enemy.Id);
-                            HandleGroupBattle(state);
-                        }
-                        continue;
-                    }
-
                     _armyMoveTimers[armyId] = GetMoveDelay(armyId);
 
-                    if (_activeBattles.ContainsKey(enemy.Id))
+                    // Бой идёт по клетке: подходящий встаёт на сторону своих,
+                    // иначе — в атакующие. Все враги клетки уже в обороне.
+                    if (_activeBattles.TryGetValue(nextRegionId, out var battle))
                     {
-                        _activeBattles[enemy.Id].Attackers.Add(army);
+                        bool sameAsAttackers = battle.Attackers.Any(a => IsInstanceValid(a) && a.PlayerId == army.PlayerId);
+                        bool sameAsDefenders = battle.Defenders.Any(d => IsInstanceValid(d) && d.PlayerId == army.PlayerId);
+                        if (sameAsDefenders
+                            && !battle.Defenders.Any(d => IsInstanceValid(d) && d.Id == armyId))
+                        {
+                            battle.Defenders.Add(army);
+                            battle.DefenderStartHp[army.Id] = army.HP;
+                            GD.Print($"Армия #{army.Id} встала на защиту {nextRegion.RegionName} (защитников: {battle.Defenders.Count})!");
+                        }
+                        else if (!sameAsDefenders
+                            && !battle.Attackers.Any(a => IsInstanceValid(a) && a.Id == armyId))
+                        {
+                            battle.Attackers.Add(army);
+                            GD.Print($"Армия #{army.Id} присоединилась к атаке (всего атакующих: {battle.Attackers.Count})!");
+                        }
                         _armiesInBattle.Add(armyId);
-                        GD.Print($"Армия #{army.Id} присоединилась к атаке на Армию #{enemy.Id} (всего атакующих: {_activeBattles[enemy.Id].Attackers.Count})");
                     }
                     else
                     {
-                        var state = new BattleState { Defender = enemy };
+                        var state = new BattleState { RegionId = nextRegionId };
                         state.Attackers.Add(army);
-                        _activeBattles[enemy.Id] = state;
                         _armiesInBattle.Add(armyId);
-                        _armiesInBattle.Add(enemy.Id);
+                        foreach (var occ in GetAllArmiesInRegion(nextRegionId))
+                        {
+                            if (!IsInstanceValid(occ) || occ.PlayerId == army.PlayerId) continue;
+                            if (GameManager.GetRelation(army.PlayerId, occ.PlayerId) != RelationState.War) continue;
+                            state.Defenders.Add(occ);
+                            state.DefenderStartHp[occ.Id] = occ.HP;
+                            _armiesInBattle.Add(occ.Id);
+                        }
+                        _activeBattles[nextRegionId] = state;
+                        GD.Print($"Бой за {nextRegion.RegionName}: атакующих {state.Attackers.Count}, защитников {state.Defenders.Count}!");
                         HandleGroupBattle(state);
                     }
                     continue;
@@ -733,6 +735,7 @@ public partial class MapGenerator : Node2D
             GD.Print($"Армия #{army.Id} погибла — нет пути для отступления!");
             _statLosses[army.PlayerId] = _statLosses.GetValueOrDefault(army.PlayerId, 0) + 1;
             int prevId = army.RegionId;
+            int deadRetreatId = army.Id;
             if (_selectedArmy != null && _selectedArmy.Id == army.Id)
             {
                 _selectedArmy = null;
@@ -741,6 +744,8 @@ public partial class MapGenerator : Node2D
             _armies.Remove(army);
             army.QueueFree();
             UpdateArmyPositions(prevId);
+            if (NetworkManager.Instance.IsServer)
+                NetworkManager.Instance.Rpc(nameof(NetworkManager.RpcSyncArmyDestroyed), deadRetreatId);
             return false;
         }
 
@@ -755,6 +760,7 @@ public partial class MapGenerator : Node2D
         {
             GD.Print($"Армия #{army.Id} рассыпалась при отступлении!");
             _statLosses[army.PlayerId] = _statLosses.GetValueOrDefault(army.PlayerId, 0) + 1;
+            int dissolveId = army.Id;
             if (_selectedArmy != null && _selectedArmy.Id == army.Id)
             {
                 _selectedArmy = null;
@@ -765,6 +771,8 @@ public partial class MapGenerator : Node2D
             _retreatTargets.Remove(army.Id);
             army.QueueFree();
             UpdateArmyPositions(prevRegionId);
+            if (NetworkManager.Instance.IsServer)
+                NetworkManager.Instance.Rpc(nameof(NetworkManager.RpcSyncArmyDestroyed), dissolveId);
             return false;
         }
 
@@ -793,19 +801,26 @@ public partial class MapGenerator : Node2D
 
     private async void HandleGroupBattle(BattleState state)
     {
-        if (IsInstanceValid(state.Defender))
-            state.DefenderStartHp = state.Defender.HP;
-        int result = await Battle(state.Attackers, state.Defender);
+        foreach (var d in state.Defenders)
+        {
+            if (!IsInstanceValid(d)) continue;
+            if (!state.DefenderStartHp.ContainsKey(d.Id))
+                state.DefenderStartHp[d.Id] = d.HP;
+        }
+        int result = await Battle(state.Attackers, state.Defenders, state.DefenderStartHp);
 
         foreach (var a in state.Attackers)
             _armiesInBattle.Remove(a.Id);
+        foreach (var d in state.Defenders)
+            _armiesInBattle.Remove(d.Id);
+        _activeBattles.Remove(state.RegionId);
 
-        _armiesInBattle.Remove(state.Defender.Id);
-        _activeBattles.Remove(state.Defender.Id);
+        string defNames = string.Join(", ", state.Defenders
+            .Where(d => IsInstanceValid(d)).Select(d => $"#{d.Id}"));
 
         if (result == 0)
         {
-            GD.Print($"Атакующие проиграли бой против Армии #{state.Defender.Id}!");
+            GD.Print($"Атакующие проиграли бой ({defNames} удержали клетку)!");
             foreach (var a in state.Attackers)
             {
                 if (IsInstanceValid(a) && a.HP > 0 && a.HP <= 10)
@@ -819,12 +834,29 @@ public partial class MapGenerator : Node2D
                     UpdateArmyPositions(a.RegionId);
                 }
             }
-            // Победивший защитник тоже ранен — иначе слабый (HP≤10) с висящим
+            // Выжившие защитники тоже ранены — иначе слабый (HP≤10) с висящим
             // приказом замрёт навсегда: шаг заблокирован, а регена без метки нет.
-            if (IsInstanceValid(state.Defender) && state.Defender.HP > 0 && state.Defender.HP < state.Defender.MaxHP)
+            foreach (var d in state.Defenders)
             {
-                state.Defender.IsWounded = true;
-                state.Defender.QueueRedraw();
+                if (IsInstanceValid(d) && d.HP > 0 && d.HP < d.MaxHP)
+                {
+                    d.IsWounded = true;
+                    d.QueueRedraw();
+                }
+            }
+            // Откат промежуточных захватов mid-battle: клетку держат защитники.
+            var holder = state.Defenders.FirstOrDefault(d => IsInstanceValid(d) && d.HP > 0);
+            if (holder != null)
+            {
+                var holdRegion = GetRegionById(state.RegionId);
+                if (holdRegion != null && holdRegion.OwnerId != holder.PlayerId)
+                {
+                    holdRegion.OwnerId = holder.PlayerId;
+                    holdRegion.OwningNation = GetNationById(holder.PlayerId);
+                    holdRegion.Color = holdRegion.OwningNation != null ? holdRegion.OwningNation.Color : Colors.White;
+                    SyncRegionCapture(holdRegion);
+                    GD.Print($"Регион {holdRegion.RegionName} удержан {holdRegion.OwningNation?.Name}!");
+                }
             }
             return;
         }
@@ -834,7 +866,8 @@ public partial class MapGenerator : Node2D
             GD.Print($"Ничья! Обе стороны ослаблены.");
             foreach (var a in state.Attackers)
                 if (IsInstanceValid(a) && a.HP > 0) RetreatArmy(a);
-            if (IsInstanceValid(state.Defender) && state.Defender.HP > 0) RetreatArmy(state.Defender);
+            foreach (var d in state.Defenders)
+                if (IsInstanceValid(d) && d.HP > 0) RetreatArmy(d);
             return;
         }
 
@@ -843,30 +876,13 @@ public partial class MapGenerator : Node2D
                 a.IsWounded = true;
 
         GD.Print($"Атакующие победили!");
-        // Уходящий после боя защитник (последний шанс) уже обрабатывается:
-        // RetreatArmy вызван в Battle, дублировать нельзя (там же метка IsWounded).
-        // Была при смерти (красный квадрат на начало боя) — разбита без отступления.
-        if (IsInstanceValid(state.Defender) && state.Defender.HP > 0
-            && !_retreatTargets.ContainsKey(state.Defender.Id))
+        // Выжившие защитники к этому моменту уже ушли/погибли в Battle.
+        // Страховка: кто остался — уходит по правилу красного квадрата.
+        foreach (var d in state.Defenders.ToList())
         {
-            if (state.DefenderStartHp <= Army.CriticalHp)
-            {
-                GD.Print($"Армия #{state.Defender.Id} разбита — была при смерти!");
-                _statLosses[state.Defender.PlayerId] = _statLosses.GetValueOrDefault(state.Defender.PlayerId, 0) + 1;
-                int deadRegionId = state.Defender.RegionId;
-                int deadId = state.Defender.Id;
-                _armies.Remove(state.Defender);
-                _retreatTimers.Remove(deadId);
-                _retreatTargets.Remove(deadId);
-                state.Defender.QueueFree();
-                UpdateArmyPositions(deadRegionId);
-                if (NetworkManager.Instance.IsServer)
-                    NetworkManager.Instance.Rpc(nameof(NetworkManager.RpcSyncArmyDestroyed), deadId);
-            }
-            else
-            {
-                RetreatArmy(state.Defender);
-            }
+            if (!IsInstanceValid(d) || d.HP <= 0) continue;
+            if (_retreatTargets.ContainsKey(d.Id)) continue;
+            ResolveDefenderExit(state, d);
         }
         // Наступление — через общий механизм шагов: _Process сделает шаг
         // с задержкой MoveDelay, заливкой стрелки, захватом и подсветкой.
@@ -876,6 +892,31 @@ public partial class MapGenerator : Node2D
             if (!IsInstanceValid(a)) continue;
             if (!_armyPaths.ContainsKey(a.Id) || _armyPaths[a.Id].Count == 0) continue;
             _armyMoveTimers[a.Id] = GetMoveDelay(a.Id);
+        }
+    }
+
+    // Исход выжившего защитника: был при смерти на начало боя —
+    // разбита без отступления, иначе штатное отступление.
+    private void ResolveDefenderExit(BattleState state, Army defender)
+    {
+        int startHp = state.DefenderStartHp.GetValueOrDefault(defender.Id, defender.HP);
+        if (startHp <= Army.CriticalHp)
+        {
+            GD.Print($"Армия #{defender.Id} разбита — была при смерти!");
+            _statLosses[defender.PlayerId] = _statLosses.GetValueOrDefault(defender.PlayerId, 0) + 1;
+            int deadRegionId = defender.RegionId;
+            int deadId = defender.Id;
+            _armies.Remove(defender);
+            _retreatTimers.Remove(deadId);
+            _retreatTargets.Remove(deadId);
+            defender.QueueFree();
+            UpdateArmyPositions(deadRegionId);
+            if (NetworkManager.Instance.IsServer)
+                NetworkManager.Instance.Rpc(nameof(NetworkManager.RpcSyncArmyDestroyed), deadId);
+        }
+        else
+        {
+            RetreatArmy(defender);
         }
     }
 
@@ -1674,7 +1715,8 @@ public partial class MapGenerator : Node2D
             var attackers = new List<Army> { army };
             _armiesInBattle.Add(army.Id);
             _armiesInBattle.Add(enemy.Id);
-            int result = await Battle(attackers, enemy);
+            int result = await Battle(attackers,
+                new List<Army> { enemy }, new Dictionary<int, int> { { enemy.Id, enemy.HP } });
             _armiesInBattle.Remove(army.Id);
             _armiesInBattle.Remove(enemy.Id);
             if (result == 0 || result == 2)
@@ -1800,27 +1842,31 @@ public partial class MapGenerator : Node2D
         armies.RemoveAll(a => !IsInstanceValid(a) || a.HP <= 0);
     }
 
-    private async System.Threading.Tasks.Task<int> Battle(List<Army> attackers, Army defender)
+    private static float ArmyPower(Army a)
+    {
+        return a.Soldiers * UnitStats.DamageMult(a.Type) * GameManager.DamageTechMult(a.PlayerId);
+    }
+
+    private async System.Threading.Tasks.Task<int> Battle(
+        List<Army> attackers, List<Army> defenders, Dictionary<int, int> defenderStartHp)
     {
         _statBattles++;
-        string attackerNames = string.Join(", ", attackers.Select(a => $"#{a.Id}(солдат:{a.Soldiers})"));
-        GD.Print($"Битва! Армии [{attackerNames}] vs Армия #{defender.Id} (солдат:{defender.Soldiers})!");
+        string attackerNames = string.Join(", ", attackers.Where(a => IsInstanceValid(a)).Select(a => $"#{a.Id}(солдат:{a.Soldiers})"));
+        string defenderNames = string.Join(", ", defenders.Where(d => IsInstanceValid(d)).Select(d => $"#{d.Id}(солдат:{d.Soldiers})"));
+        GD.Print($"Битва! Армии [{attackerNames}] vs Армии [{defenderNames}]!");
 
         int round = 0;
         while (true)
         {
             attackers.RemoveAll(a => !IsInstanceValid(a) || a.HP <= 0);
+            defenders.RemoveAll(d => !IsInstanceValid(d) || d.HP <= 0);
             if (attackers.Count == 0)
             {
                 GD.Print("Все атакующие уничтожены!");
-                if (IsInstanceValid(defender) && defender.HP <= 0)
-                    DestroyDefender(defender, attackers);
                 return 0;
             }
-
-            if (defender.HP <= 0)
+            if (defenders.Count == 0)
             {
-                DestroyDefender(defender, attackers);
                 return 1;
             }
 
@@ -1831,43 +1877,58 @@ public partial class MapGenerator : Node2D
             bool groupAttack = attackers.Count > 1;
             foreach (var a in attackers)
             {
+                if (!IsInstanceValid(a)) continue;
                 float tact = groupAttack && GameManager.HasTech(a.PlayerId, 9) ? 1.15f : 1f;
-                totalAtkPower += a.Soldiers * UnitStats.DamageMult(a.Type)
-                    * GameManager.DamageTechMult(a.PlayerId) * tact;
+                totalAtkPower += ArmyPower(a) * tact;
             }
 
-            float defPower = Mathf.Max(1f, defender.Soldiers * UnitStats.DamageMult(defender.Type)
-                * GameManager.DamageTechMult(defender.PlayerId));
+            float totalDefPower = 0f;
+            foreach (var d in defenders)
+            {
+                if (!IsInstanceValid(d)) continue;
+                totalDefPower += ArmyPower(d);
+            }
+
+            float defPower = Mathf.Max(1f, totalDefPower);
             float atkPower = Mathf.Max(1f, totalAtkPower);
 
             // Детерминированный рандом: сид от боя и раунда — все пиры
             // получают одинаковый множитель при тех же участниках.
+            var firstDef = defenders.FirstOrDefault(d => IsInstanceValid(d));
             var battleRng = new RandomNumberGenerator();
-            battleRng.Seed = (ulong)defender.Id * 1000003UL + (ulong)round;
+            battleRng.Seed = (ulong)(firstDef != null ? firstDef.Id : 0) * 1000003UL + (ulong)round;
             float randMult = battleRng.RandfRange(0.7f, 1.3f);
 
             // Урон зависит от соотношения эффективной силы (солдаты × тип):
             // большая армия бьёт сильнее и получает меньше.
             // Потолок держит бой читаемым (не короче ~11 раундов).
             // Укрепления столицы снижают входящий урон защитнику.
+            // Урон стороны делится по долям силы (общий котёл обороны).
             float atkRatio = Mathf.Clamp(atkPower / defPower, BattleRatioMin, BattleRatioMax);
             float defRatio = Mathf.Clamp(defPower / atkPower, BattleRatioMin, BattleRatioMax);
 
             float fortMult = 1f;
-            var defRegion = GetRegionById(defender.RegionId);
+            var defRegion = firstDef != null ? GetRegionById(firstDef.RegionId) : null;
             if (defRegion != null && defRegion.FortLevel > 0)
                 fortMult = 1f - GameManager.FortDamageReduction * defRegion.FortLevel;
 
-            int defenderHPLoss = Mathf.Clamp((int)(BattleBaseHit * atkRatio * randMult * 0.7f * fortMult), 1, BattleMaxHitPerRound);
-            int defenderHpBefore = defender.HP;
-            defender.HP -= defenderHPLoss;
+            int totalDefLoss = Mathf.Clamp((int)(BattleBaseHit * atkRatio * randMult * 0.7f * fortMult),
+                1, BattleMaxHitPerRound * System.Math.Max(1, defenders.Count));
+            var defenderHpBefore = new Dictionary<int, int>();
+            foreach (var d in defenders)
+            {
+                if (!IsInstanceValid(d) || d.HP <= 0) continue;
+                defenderHpBefore[d.Id] = d.HP;
+                float share = ArmyPower(d) / defPower;
+                int loss = Mathf.Max(1, (int)(totalDefLoss * share));
+                d.HP -= loss;
+            }
 
             foreach (var a in attackers)
             {
                 if (!IsInstanceValid(a) || a.HP <= 0) continue;
                 float tactShare = groupAttack && GameManager.HasTech(a.PlayerId, 9) ? 1.15f : 1f;
-                float share = a.Soldiers * UnitStats.DamageMult(a.Type)
-                    * GameManager.DamageTechMult(a.PlayerId) * tactShare / atkPower;
+                float share = ArmyPower(a) * tactShare / atkPower;
                 int loss = Mathf.Clamp((int)(BattleBaseHit * defRatio * randMult * share), 1, BattleMaxHitPerRound);
                 a.HP -= loss;
                 if (IsInstanceValid(a)) a.QueueRedraw();
@@ -1877,8 +1938,12 @@ public partial class MapGenerator : Node2D
             // развилки «слаб/не слаб» и длины боёв сходятся.
             if (NetworkManager.Instance.IsServer)
             {
-                NetworkManager.Instance.Rpc(nameof(NetworkManager.RpcSyncArmyHP),
-                    defender.Id, defender.HP, defender.Soldiers, defender.IsWounded);
+                foreach (var d in defenders)
+                {
+                    if (!IsInstanceValid(d)) continue;
+                    NetworkManager.Instance.Rpc(nameof(NetworkManager.RpcSyncArmyHP),
+                        d.Id, d.HP, d.Soldiers, d.IsWounded);
+                }
                 foreach (var a in attackers)
                 {
                     if (!IsInstanceValid(a)) continue;
@@ -1889,52 +1954,97 @@ public partial class MapGenerator : Node2D
 
             // Эффекты раунда: вспышки урона (звук ударов и тряска отключены).
             // До проверки побега — решающий удар тоже виден.
-            if (IsInstanceValid(defender)) defender.FlashHit();
+            foreach (var d in defenders)
+                if (IsInstanceValid(d)) d.FlashHit();
             foreach (var a in attackers)
                 if (IsInstanceValid(a)) a.FlashHit();
 
-            // Последний шанс: ушедший в минус защитник уходит после боя с 1 HP —
-            // но только если до смертельного раунда не был при смерти
-            // (красноквадратные не сбегают, см. правило красного квадрата).
-            if (IsInstanceValid(defender) && defender.HP <= 0)
+            // Последний шанс — персонально: ушедший в минус защитник уходит
+            // после боя с 1 HP, но только если до смертельного раунда не был
+            // при смерти (красноквадратные не сбегают). Бой продолжается.
+            foreach (var d in defenders.ToList())
             {
+                if (!IsInstanceValid(d) || d.HP > 0) continue;
                 PurgeDeadArmies(attackers);
-                if (defenderHpBefore > Army.CriticalHp)
+                int hpBefore = defenderHpBefore.GetValueOrDefault(d.Id, d.HP);
+                if (hpBefore > Army.CriticalHp)
                 {
-                    defender.HP = 1;
-                    defender.QueueRedraw();
-                    GD.Print($"Армия #{defender.Id} уцелела с 1 HP и уходит после боя!");
-                    RetreatArmy(defender);
+                    d.HP = 1;
+                    d.QueueRedraw();
+                    GD.Print($"Армия #{d.Id} уцелела с 1 HP и уходит после боя!");
+                    RetreatArmy(d);
                 }
                 else
                 {
-                    GD.Print($"Армия #{defender.Id} добита (была при смерти)!");
-                    DestroyDefender(defender, attackers);
+                    GD.Print($"Армия #{d.Id} добита (была при смерти)!");
+                    DestroyDefender(d, attackers);
                 }
-                return 1;
+                defenders.Remove(d);
+                _armiesInBattle.Remove(d.Id);
             }
 
-            if (IsInstanceValid(defender)) defender.QueueRedraw();
+            // Слабые защитники отходят по одному (красное правило — персонально).
+            foreach (var d in defenders.ToList())
+            {
+                if (!IsInstanceValid(d) || d.HP <= 0 || d.HP > 10) continue;
+                int startHp = defenderStartHp.TryGetValue(d.Id, out var s) ? s : int.MaxValue;
+                if (startHp <= Army.CriticalHp)
+                {
+                    GD.Print($"Армия #{d.Id} разбита — была при смерти!");
+                    _statLosses[d.PlayerId] = _statLosses.GetValueOrDefault(d.PlayerId, 0) + 1;
+                    int deadRegionId = d.RegionId;
+                    int deadId = d.Id;
+                    _armies.Remove(d);
+                    _retreatTimers.Remove(deadId);
+                    _retreatTargets.Remove(deadId);
+                    d.QueueFree();
+                    UpdateArmyPositions(deadRegionId);
+                    if (NetworkManager.Instance.IsServer)
+                        NetworkManager.Instance.Rpc(nameof(NetworkManager.RpcSyncArmyDestroyed), deadId);
+                }
+                else
+                {
+                    GD.Print($"Армия #{d.Id} отходит (HP={d.HP})!");
+                    RetreatArmy(d);
+                }
+                defenders.Remove(d);
+                _armiesInBattle.Remove(d.Id);
+            }
 
-            if (_selectedArmy != null && IsInstanceValid(_selectedArmy))
+            if (IsInstanceValid(_selectedArmy))
                 _regionPanel.ShowArmyInfo(_selectedArmy.Id, _selectedArmy.Soldiers, _selectedArmy.HP, _selectedArmy.MaxHP, _selectedArmy.Type);
             else if (_selectedArmy != null)
                 _regionPanel.HideArmyInfo();
 
             string logAttackers = string.Join(", ", attackers.Where(a => IsInstanceValid(a)).Select(a => $"#{a.Id}:{a.Soldiers}"));
-            GD.Print($"Раунд {round}: Атакующие [{logAttackers}] (-{defenderHPLoss} HP врага), Армия #{defender.Id} HP={defender.HP}");
+            string logDefenders = string.Join(", ", defenders.Where(d => IsInstanceValid(d)).Select(d => $"#{d.Id}:{d.HP}HP"));
+            GD.Print($"Раунд {round}: Атакующие [{logAttackers}], Защитники [{logDefenders}]");
 
-            bool defendersWeak = defender.HP <= 10;
             bool attackersWeak = true;
             foreach (var a in attackers)
                 if (IsInstanceValid(a) && a.HP > 10) { attackersWeak = false; break; }
 
-            if (defendersWeak || attackersWeak)
+            bool anyAttackerAlive = attackers.Any(a => IsInstanceValid(a) && a.HP > 0);
+            bool anyDefenderAlive = defenders.Any(d => IsInstanceValid(d) && d.HP > 0);
+            if (!anyDefenderAlive && !anyAttackerAlive)
             {
-                GD.Print($"Бой прекращён! Защитник: {defender.HP}HP, Атакующие Weak={attackersWeak}");
+                GD.Print($"Бой прекращён! Обе стороны полегли.");
                 PurgeDeadArmies(attackers);
-                if (defendersWeak && attackersWeak) return 2;
-                if (defendersWeak) return 1;
+                PurgeDeadArmies(defenders);
+                return 2;
+            }
+            if (!anyDefenderAlive)
+            {
+                GD.Print($"Бой прекращён! Защита сметена.");
+                PurgeDeadArmies(attackers);
+                PurgeDeadArmies(defenders);
+                return 1;
+            }
+            if (!anyAttackerAlive || attackersWeak)
+            {
+                GD.Print($"Бой прекращён! Атака отбита.");
+                PurgeDeadArmies(attackers);
+                PurgeDeadArmies(defenders);
                 return 0;
             }
         }
