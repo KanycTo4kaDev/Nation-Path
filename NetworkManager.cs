@@ -13,7 +13,7 @@ public partial class NetworkManager : Node
     public const int DefaultPort = 7000;
     public const int BroadcastPort = 7001;
     public const int MaxPlayers = 4;
-    public const int ProtocolVersion = 3;
+    public const int ProtocolVersion = 4;
     private const float ConnectionTimeout = 10.0f;
 
     public bool IsServer { get; private set; }
@@ -410,6 +410,31 @@ public partial class NetworkManager : Node
     }
 
     [Rpc(MultiplayerApi.RpcMode.Authority, CallLocal = true)]
+    public void RpcAnnounceWar(int nationA, int nationB)
+    {
+        var map = GetNodeOrNull<MapGenerator>("/root/Main");
+        map?.AnnounceWar(nationA, nationB);
+    }
+
+    [Rpc(MultiplayerApi.RpcMode.Authority, CallLocal = true)]
+    public void RpcSyncPactOffer(int fromNation, int toNation)
+    {
+        int key = GameManager.RelationKey(fromNation, toNation);
+        GameManager.Instance.PactOffers[key] = fromNation;
+        GameManager.Instance.PactOfferTimers[key] = GameManager.PactOfferTimeout;
+        GD.Print($"Предложен пакт: {fromNation} → {toNation}");
+    }
+
+    [Rpc(MultiplayerApi.RpcMode.Authority, CallLocal = true)]
+    public void RpcSyncPactWithdraw(int nationA, int nationB)
+    {
+        int key = GameManager.RelationKey(nationA, nationB);
+        GameManager.Instance.PactOffers.Remove(key);
+        GameManager.Instance.PactOfferTimers.Remove(key);
+        GD.Print($"Предложение пакта снято (пара {key})");
+    }
+
+    [Rpc(MultiplayerApi.RpcMode.Authority, CallLocal = true)]
     public void RpcSyncRelation(int nationA, int nationB, int stateInt, float pactLeft)
     {
         int key = GameManager.RelationKey(nationA, nationB);
@@ -447,7 +472,9 @@ public partial class NetworkManager : Node
             Arg3 = arg3,
         };
         // Дипломатия — строго от своей нации (анти-подмена).
-        if (cmd.Type == CommandType.SetRelation)
+        if (cmd.Type == CommandType.SetRelation
+            || cmd.Type == CommandType.ProposePact
+            || cmd.Type == CommandType.AnswerPact)
         {
             int sender = Multiplayer.GetRemoteSenderId();
             int senderNation = _peerNationMap.GetValueOrDefault(sender, -1);
@@ -487,6 +514,12 @@ public partial class NetworkManager : Node
                 break;
             case CommandType.SetRelation:
                 map.ServerSetRelation(cmd.PlayerId, cmd.Arg1, (RelationState)cmd.Arg2);
+                break;
+            case CommandType.ProposePact:
+                map.ServerProposePact(cmd.PlayerId, cmd.Arg1);
+                break;
+            case CommandType.AnswerPact:
+                map.ServerAnswerPact(cmd.PlayerId, cmd.Arg1, cmd.Arg2 != 0);
                 break;
         }
     }

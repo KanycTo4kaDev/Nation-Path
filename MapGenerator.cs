@@ -1099,6 +1099,26 @@ public partial class MapGenerator : Node2D
             GD.Print($"Пакт истёк, снова нейтралитет (пара {key})");
         }
 
+        // Истечение предложений пакта (60с без ответа — отклонено).
+        var expiredOffers = new List<int>();
+        foreach (var kvp in new List<KeyValuePair<int, float>>(GameManager.Instance.PactOfferTimers))
+        {
+            float left = kvp.Value - GameManager.IncomeInterval;
+            if (left <= 0f)
+                expiredOffers.Add(kvp.Key);
+            else
+                GameManager.Instance.PactOfferTimers[kvp.Key] = left;
+        }
+        foreach (int key in expiredOffers)
+        {
+            GameManager.Instance.PactOfferTimers.Remove(key);
+            GameManager.Instance.PactOffers.Remove(key);
+            GD.Print($"Предложение пакта истекло (пара {key})");
+            if (NetworkManager.Instance.IsServer)
+                NetworkManager.Instance.Rpc(nameof(NetworkManager.RpcSyncPactWithdraw),
+                    key / 10, key % 10);
+        }
+
         UpdateGoldHUD();
     }
 
@@ -1382,17 +1402,92 @@ public partial class MapGenerator : Node2D
         if (current == RelationState.War) return false;
         ApplyRelation(me, other, RelationState.War);
         AudioHub.Instance?.PlayClick();
+        AnnounceWar(me, other);
         return true;
     }
 
     public bool MakePactForPlayer(int other)
     {
+        return ProposePactForPlayer(other);
+    }
+
+    // Предложить пакт (или отозвать своё предложение повторным вызовом).
+    // Пакт вступает только после акцепта второй стороны.
+    public bool ProposePactForPlayer(int other)
+    {
         int me = GameManager.Instance.PlayerNationId;
         if (!CanSetRelation(me, other)) return false;
-        if (GameManager.GetRelation(me, other) == RelationState.Pact) return false;
-        ApplyRelation(me, other, RelationState.Pact);
+        if (GameManager.GetRelation(me, other) != RelationState.Neutral) return false;
+        int key = GameManager.RelationKey(me, other);
+        if (GameManager.Instance.PactOffers.TryGetValue(key, out int proposer) && proposer == me)
+        {
+            GameManager.Instance.PactOffers.Remove(key);
+            GameManager.Instance.PactOfferTimers.Remove(key);
+            GD.Print($"Предложение пакта отозвано (пара {key})");
+        }
+        else
+        {
+            GameManager.Instance.PactOffers[key] = me;
+            GameManager.Instance.PactOfferTimers[key] = GameManager.PactOfferTimeout;
+            GD.Print($"Предложен пакт: {me} → {other}");
+        }
         AudioHub.Instance?.PlayClick();
         return true;
+    }
+
+    public bool AnswerPactForPlayer(int from, bool accept)
+    {
+        int me = GameManager.Instance.PlayerNationId;
+        int key = GameManager.RelationKey(me, from);
+        if (!GameManager.Instance.PactOffers.TryGetValue(key, out int proposer) || proposer != from)
+            return false;
+        GameManager.Instance.PactOffers.Remove(key);
+        GameManager.Instance.PactOfferTimers.Remove(key);
+        if (accept && GameManager.GetRelation(me, from) == RelationState.Neutral)
+            ApplyRelation(me, from, RelationState.Pact);
+        AudioHub.Instance?.PlayClick();
+        return true;
+    }
+
+    public void ServerProposePact(int fromNation, int toNation)
+    {
+        if (!CanSetRelation(fromNation, toNation)) return;
+        if (GameManager.GetRelation(fromNation, toNation) != RelationState.Neutral) return;
+        int key = GameManager.RelationKey(fromNation, toNation);
+        if (GameManager.Instance.PactOffers.TryGetValue(key, out int proposer) && proposer == fromNation)
+        {
+            GameManager.Instance.PactOffers.Remove(key);
+            GameManager.Instance.PactOfferTimers.Remove(key);
+            GD.Print($"Предложение пакта отозвано (пара {key})");
+        }
+        else
+        {
+            GameManager.Instance.PactOffers[key] = fromNation;
+            GameManager.Instance.PactOfferTimers[key] = GameManager.PactOfferTimeout;
+            GD.Print($"Предложен пакт: {fromNation} → {toNation}");
+        }
+        if (NetworkManager.Instance.IsServer)
+        {
+            if (GameManager.Instance.PactOffers.ContainsKey(key))
+                NetworkManager.Instance.Rpc(nameof(NetworkManager.RpcSyncPactOffer), fromNation, toNation);
+            else
+                NetworkManager.Instance.Rpc(nameof(NetworkManager.RpcSyncPactWithdraw),
+                    System.Math.Min(fromNation, toNation), System.Math.Max(fromNation, toNation));
+        }
+    }
+
+    public void ServerAnswerPact(int targetNation, int fromNation, bool accept)
+    {
+        int key = GameManager.RelationKey(targetNation, fromNation);
+        if (!GameManager.Instance.PactOffers.TryGetValue(key, out int proposer) || proposer != fromNation)
+            return;
+        GameManager.Instance.PactOffers.Remove(key);
+        GameManager.Instance.PactOfferTimers.Remove(key);
+        if (NetworkManager.Instance.IsServer)
+            NetworkManager.Instance.Rpc(nameof(NetworkManager.RpcSyncPactWithdraw),
+                System.Math.Min(targetNation, fromNation), System.Math.Max(targetNation, fromNation));
+        if (accept)
+            ServerSetRelation(targetNation, fromNation, RelationState.Pact);
     }
 
     public bool ProposePeaceForPlayer(int other)
@@ -1416,6 +1511,13 @@ public partial class MapGenerator : Node2D
         if (state == RelationState.Neutral && current != RelationState.War) return;
         ApplyRelation(nationA, nationB, state);
         SyncRelationToClients(nationA, nationB);
+        if (state == RelationState.War)
+        {
+            if (NetworkManager.Instance.IsServer)
+                NetworkManager.Instance.Rpc(nameof(NetworkManager.RpcAnnounceWar), nationA, nationB);
+            else if (!GameManager.Instance.IsMultiplayerGame)
+                AnnounceWar(nationA, nationB);
+        }
     }
 
     private void SyncRelationToClients(int nationA, int nationB)
@@ -2743,6 +2845,55 @@ public partial class MapGenerator : Node2D
             AudioHub.Instance?.PlayDefeat();
 
         GD.Print($"Игра окончена! Победитель: {winnerId}");
+    }
+
+    private CanvasLayer _warPopup;
+
+    public void AnnounceWar(int nationA, int nationB)
+    {
+        if (_warPopup != null && IsInstanceValid(_warPopup))
+            _warPopup.QueueFree();
+
+        string an = GetNationById(nationA)?.Name ?? "?";
+        string bn = GetNationById(nationB)?.Name ?? "?";
+
+        _warPopup = new CanvasLayer();
+        _warPopup.Layer = 70;
+        AddChild(_warPopup);
+
+        var dim = new ColorRect();
+        dim.Color = new Color(0f, 0f, 0f, 0.45f);
+        dim.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+        dim.MouseFilter = Control.MouseFilterEnum.Stop;
+        _warPopup.AddChild(dim);
+
+        var center = new CenterContainer();
+        center.SetAnchorsPreset(Control.LayoutPreset.FullRect);
+        center.MouseFilter = Control.MouseFilterEnum.Ignore;
+        _warPopup.AddChild(center);
+
+        var vbox = new VBoxContainer();
+        vbox.AddThemeConstantOverride("separation", 14);
+        center.AddChild(vbox);
+
+        var title = new Label();
+        title.Text = $"{an} объявил войну: {bn}!";
+        title.HorizontalAlignment = HorizontalAlignment.Center;
+        title.AddThemeFontSizeOverride("font_size", 36);
+        title.AddThemeColorOverride("font_color", new Color(1f, 0.35f, 0.3f));
+        vbox.AddChild(title);
+
+        var dismissBtn = MakeMenuButton("вы че там, поахуй");
+        dismissBtn.Pressed += () =>
+        {
+            AudioHub.Instance?.PlayClick();
+            if (_warPopup != null && IsInstanceValid(_warPopup))
+                _warPopup.QueueFree();
+            _warPopup = null;
+        };
+        vbox.AddChild(dismissBtn);
+
+        GD.Print($"Анонс войны: {an} vs {bn}");
     }
 
     private Button MakeMenuButton(string text)

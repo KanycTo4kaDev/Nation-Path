@@ -27,6 +27,10 @@ public partial class GameManager : Node
     public Dictionary<int, int> Relations = new();
     public Dictionary<int, float> PactTimers = new();
     public const float PactDuration = 300f;
+    // Предложения пакта: ключ пары → предложивший. Ждут акцепта второй стороны.
+    public Dictionary<int, int> PactOffers = new();
+    public Dictionary<int, float> PactOfferTimers = new();
+    public const float PactOfferTimeout = 60f;
 
     public static int RelationKey(int a, int b)
     {
@@ -270,6 +274,8 @@ public partial class GameManager : Node
     {
         Relations.Clear();
         PactTimers.Clear();
+        PactOffers.Clear();
+        PactOfferTimers.Clear();
         for (int a = 0; a < nationCount; a++)
             for (int b = a + 1; b < nationCount; b++)
                 Relations[RelationKey(a, b)] = (int)RelationState.Neutral;

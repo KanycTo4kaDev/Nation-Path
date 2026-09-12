@@ -74,6 +74,8 @@ public enum CommandType
     BuildUniversity,
     Research,
     SetRelation,
+    ProposePact,
+    AnswerPact,
     SelectArmy,
     DeselectArmy,
 }

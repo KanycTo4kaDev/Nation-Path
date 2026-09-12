@@ -20,6 +20,8 @@ public partial class SideTabs : CanvasLayer
     private Button _warBtn;
     private Button _pactBtn;
     private Button _peaceBtn;
+    private Button _acceptBtn;
+    private Button _declineBtn;
     private int _diploSelected = -1;
     private VBoxContainer _researchBox;
     private Label _researchPointsLabel;
@@ -276,6 +278,20 @@ public partial class SideTabs : CanvasLayer
         _peaceBtn.Visible = false;
         right.AddChild(_peaceBtn);
 
+        _acceptBtn = new Button();
+        _acceptBtn.Text = "Принять пакт";
+        _acceptBtn.AddThemeFontSizeOverride("font_size", 14);
+        _acceptBtn.Pressed += OnAcceptPactPressed;
+        _acceptBtn.Visible = false;
+        right.AddChild(_acceptBtn);
+
+        _declineBtn = new Button();
+        _declineBtn.Text = "Отклонить";
+        _declineBtn.AddThemeFontSizeOverride("font_size", 14);
+        _declineBtn.Pressed += OnDeclinePactPressed;
+        _declineBtn.Visible = false;
+        right.AddChild(_declineBtn);
+
         return box;
     }
 
@@ -392,6 +408,18 @@ public partial class SideTabs : CanvasLayer
             }
         }
 
+        int pairKey = GameManager.RelationKey(me, _diploSelected);
+        bool hasOffer = GameManager.Instance.PactOffers.TryGetValue(pairKey, out int proposer);
+        bool incoming = hasOffer && proposer == _diploSelected;
+        bool outgoing = hasOffer && proposer == me;
+
+        bool showActions = !incoming;
+        if (_warBtn != null) _warBtn.Visible = showActions;
+        if (_pactBtn != null) _pactBtn.Visible = showActions;
+        if (_peaceBtn != null) _peaceBtn.Visible = showActions && targetRel == RelationState.War;
+        if (_acceptBtn != null) _acceptBtn.Visible = incoming && !observer;
+        if (_declineBtn != null) _declineBtn.Visible = incoming && !observer;
+
         if (_warBtn != null)
         {
             _warBtn.Disabled = observer || targetRel == RelationState.War || targetRel == RelationState.Pact;
@@ -401,12 +429,19 @@ public partial class SideTabs : CanvasLayer
         }
         if (_pactBtn != null)
         {
-            _pactBtn.Disabled = observer || targetRel == RelationState.Pact;
-            _pactBtn.Text = targetRel == RelationState.Pact ? "Пакт действует" : "Пакт о ненападении";
+            if (outgoing)
+            {
+                _pactBtn.Disabled = observer;
+                _pactBtn.Text = "Ожидает ответа… (отозвать)";
+            }
+            else
+            {
+                _pactBtn.Disabled = observer || targetRel == RelationState.Pact;
+                _pactBtn.Text = targetRel == RelationState.Pact ? "Пакт действует" : "Пакт о ненападении";
+            }
         }
         if (_peaceBtn != null)
         {
-            _peaceBtn.Visible = targetRel == RelationState.War;
             _peaceBtn.Disabled = observer;
         }
     }
@@ -446,15 +481,48 @@ public partial class SideTabs : CanvasLayer
         {
             NetworkManager.Instance.SendCommand(new GameCommand
             {
-                Type = CommandType.SetRelation,
+                Type = CommandType.ProposePact,
                 PlayerId = me,
                 Arg1 = _diploSelected,
-                Arg2 = (int)RelationState.Pact,
             });
         }
         else
         {
-            map.MakePactForPlayer(_diploSelected);
+            map.ProposePactForPlayer(_diploSelected);
+        }
+        UpdateDiploUI();
+    }
+
+    private void OnAcceptPactPressed()
+    {
+        AnswerPact(true);
+    }
+
+    private void OnDeclinePactPressed()
+    {
+        AnswerPact(false);
+    }
+
+    private void AnswerPact(bool accept)
+    {
+        var map = Map();
+        if (map == null || IsObserver() || _diploSelected < 0) return;
+        AudioHub.Instance?.PlayClick();
+        int me = DiploActingNation();
+
+        if (GameManager.Instance.IsMultiplayerGame)
+        {
+            NetworkManager.Instance.SendCommand(new GameCommand
+            {
+                Type = CommandType.AnswerPact,
+                PlayerId = me,
+                Arg1 = _diploSelected,
+                Arg2 = accept ? 1 : 0,
+            });
+        }
+        else
+        {
+            map.AnswerPactForPlayer(_diploSelected, accept);
         }
         UpdateDiploUI();
     }

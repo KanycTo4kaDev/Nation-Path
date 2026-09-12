@@ -45,8 +45,23 @@ public partial class AIPlayer : Node
 
     private void Think()
     {
+        AcceptPactOffers();
         BuildPhase();
         MovePhase();
+    }
+
+    // Боты принимают входящие предложения пакта (обе сложности).
+    private void AcceptPactOffers()
+    {
+        foreach (var kvp in new System.Collections.Generic.List<System.Collections.Generic.KeyValuePair<int, int>>(GameManager.Instance.PactOffers))
+        {
+            int a = kvp.Key / 10;
+            int b = kvp.Key % 10;
+            if (a != NationId && b != NationId) continue;
+            int from = a == NationId ? b : a;
+            if (kvp.Value != from) continue;
+            _map.ServerAnswerPact(NationId, from, true);
+        }
     }
 
     private void BuildPhase()
