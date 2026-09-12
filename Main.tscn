@@ -1,0 +1,10 @@
+[gd_scene format=3 uid="uid://b1"]
+
+[ext_resource type="Script" uid="uid://btxi00lkscx6n" path="res://MapGenerator.cs" id="1"]
+[ext_resource type="Script" path="res://CameraController.cs" id="2"]
+
+[node name="Main" type="Node2D" unique_id=1071606940]
+script = ExtResource("1")
+
+[node name="Camera2D" type="Camera2D" parent="."]
+script = ExtResource("2")
