@@ -103,6 +103,9 @@ public partial class AIPlayer : Node
                 return;
             }
 
+            if (GameManager.Instance.ResearchQueue.GetValueOrDefault(NationId, -1) >= 0)
+                return;
+
             for (int tech = 0; tech < 11; tech++)
             {
                 if (GameManager.HasTech(NationId, tech)) continue;

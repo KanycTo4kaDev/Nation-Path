@@ -1080,6 +1080,21 @@ public partial class MapGenerator : Node2D
                     CompleteOrder(nation);
                 }
             }
+
+            // Исследования: 6 дней, завершение детерминировано на всех пирах.
+            int studying = GameManager.Instance.ResearchQueue.GetValueOrDefault(id, -1);
+            if (studying >= 0)
+            {
+                int left = GameManager.Instance.ResearchDays.GetValueOrDefault(id, 0) - 1;
+                if (left <= 0)
+                {
+                    CompleteResearch(id);
+                }
+                else
+                {
+                    GameManager.Instance.ResearchDays[id] = left;
+                }
+            }
         }
 
         // Истечение пактов (раз в тик, детерминировано на всех пирах).
@@ -1305,6 +1320,7 @@ public partial class MapGenerator : Node2D
         if (techId < 0 || techId > 10) return false;
         if (playerId < 0) return false;
         if (GameManager.HasTech(playerId, techId)) return false;
+        if (GameManager.Instance.ResearchQueue.GetValueOrDefault(playerId, -1) >= 0) return false;
         foreach (int req in GameManager.TechRequires(techId))
         {
             if (!GameManager.HasTech(playerId, req)) return false;
@@ -1325,6 +1341,7 @@ public partial class MapGenerator : Node2D
         {
             if (!GameManager.HasTech(playerId, req)) return false;
         }
+        if (GameManager.Instance.ResearchQueue.GetValueOrDefault(playerId, -1) >= 0) return false;
 
         if (!god)
         {
@@ -1333,11 +1350,11 @@ public partial class MapGenerator : Node2D
             GameManager.Instance.Research[playerId] -= GameManager.TechResearchCost(techId);
         }
 
-        GameManager.Instance.TechMask[playerId] =
-            GameManager.Instance.TechMask.GetValueOrDefault(playerId, 0) | (1 << techId);
-        AudioHub.Instance?.PlayBuild();
+        GameManager.Instance.ResearchQueue[playerId] = techId;
+        GameManager.Instance.ResearchDays[playerId] = GameManager.ResearchDurationDays;
+        AudioHub.Instance?.PlayClick();
         UpdateGoldHUD();
-        GD.Print($"{GetNationById(playerId).Name} изучил: {GameManager.TechName(techId)}");
+        GD.Print($"{GetNationById(playerId).Name} начал изучать: {GameManager.TechName(techId)}");
         return true;
     }
 
@@ -1346,11 +1363,28 @@ public partial class MapGenerator : Node2D
         if (!CanResearch(playerId, techId)) return;
         GameManager.Instance.Gold[playerId] -= GameManager.TechGoldCost(techId);
         GameManager.Instance.Research[playerId] -= GameManager.TechResearchCost(techId);
-        GameManager.Instance.TechMask[playerId] =
-            GameManager.Instance.TechMask.GetValueOrDefault(playerId, 0) | (1 << techId);
-        AudioHub.Instance?.PlayBuild();
-        GD.Print($"Исследовано: {GameManager.TechName(techId)} (нация {playerId})");
+        GameManager.Instance.ResearchQueue[playerId] = techId;
+        GameManager.Instance.ResearchDays[playerId] = GameManager.ResearchDurationDays;
+        GD.Print($"Начато исследование: {GameManager.TechName(techId)} (нация {playerId})");
         SyncEconomyToClients(playerId);
+        if (NetworkManager.Instance.IsServer)
+            NetworkManager.Instance.Rpc(nameof(NetworkManager.RpcSyncResearch),
+                playerId, techId, GameManager.ResearchDurationDays);
+    }
+
+    private void CompleteResearch(int nationId)
+    {
+        int techId = GameManager.Instance.ResearchQueue.GetValueOrDefault(nationId, -1);
+        GameManager.Instance.ResearchQueue[nationId] = -1;
+        GameManager.Instance.ResearchDays[nationId] = 0;
+        if (techId < 0) return;
+        GameManager.Instance.TechMask[nationId] =
+            GameManager.Instance.TechMask.GetValueOrDefault(nationId, 0) | (1 << techId);
+        AudioHub.Instance?.PlayBuild();
+        GD.Print($"{GetNationById(nationId)?.Name} изучил: {GameManager.TechName(techId)}");
+        SyncEconomyToClients(nationId);
+        if (NetworkManager.Instance.IsServer)
+            NetworkManager.Instance.Rpc(nameof(NetworkManager.RpcSyncResearch), nationId, -1, 0);
     }
 
     private void SyncEconomyToClients(int playerId)

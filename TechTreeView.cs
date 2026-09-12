@@ -110,6 +110,11 @@ public partial class TechTreeView : Control
         {
             text += "\n✓ Изучено";
         }
+        else if (GameManager.Instance.ResearchQueue.GetValueOrDefault(_nation, -1) == tech)
+        {
+            int left = GameManager.Instance.ResearchDays.GetValueOrDefault(_nation, 0);
+            text += $"\nИзучается… ({left} дн.)";
+        }
         else
         {
             string reqText = "";
@@ -269,11 +274,25 @@ public partial class TechTreeView : Control
             int state;
             string caption;
             bool enabled;
+            int studying = GameManager.Instance.ResearchQueue.GetValueOrDefault(nation, -1);
 
             if (owned)
             {
                 state = 2;
                 caption = $"✓ {GameManager.TechName(tech)}";
+                enabled = false;
+            }
+            else if (studying == tech)
+            {
+                state = 1;
+                int left = GameManager.Instance.ResearchDays.GetValueOrDefault(nation, 0);
+                caption = $"{GameManager.TechName(tech)}\nИзучается… ({left} дн.)";
+                enabled = false;
+            }
+            else if (studying >= 0)
+            {
+                state = 0;
+                caption = $"{GameManager.TechName(tech)}\nЗанято другим";
                 enabled = false;
             }
             else if (!reqOk)

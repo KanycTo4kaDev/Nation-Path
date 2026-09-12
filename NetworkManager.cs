@@ -435,6 +435,14 @@ public partial class NetworkManager : Node
     }
 
     [Rpc(MultiplayerApi.RpcMode.Authority, CallLocal = true)]
+    public void RpcSyncResearch(int nationId, int techId, int daysLeft)
+    {
+        GameManager.Instance.ResearchQueue[nationId] = techId;
+        GameManager.Instance.ResearchDays[nationId] = daysLeft;
+        GD.Print($"Исследование: нация {nationId}, тех {techId}, дней: {daysLeft}");
+    }
+
+    [Rpc(MultiplayerApi.RpcMode.Authority, CallLocal = true)]
     public void RpcSyncRelation(int nationA, int nationB, int stateInt, float pactLeft)
     {
         int key = GameManager.RelationKey(nationA, nationB);

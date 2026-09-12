@@ -22,6 +22,10 @@ public partial class GameManager : Node
     public Dictionary<int, string> BuildOrders = new();
     public Dictionary<int, int> DayUpkeep = new();
     public int Day = 1;
+    // Очередь исследований: нация → techId (-1 = пусто), дней осталось.
+    public Dictionary<int, int> ResearchQueue = new();
+    public Dictionary<int, int> ResearchDays = new();
+    public const int ResearchDurationDays = 6;
 
     // Дипломатия: ключ пары min*10+max (01/02/03/12/13/23), значение — RelationState.
     public Dictionary<int, int> Relations = new();
@@ -266,6 +270,8 @@ public partial class GameManager : Node
             TechMask[i] = 0;
             BuildOrders[i] = "";
             DayUpkeep[i] = 0;
+            ResearchQueue[i] = -1;
+            ResearchDays[i] = 0;
         }
         InitDiplomacy(nationCount);
     }
