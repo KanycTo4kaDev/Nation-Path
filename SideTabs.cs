@@ -817,7 +817,7 @@ public partial class SideTabs : CanvasLayer
         bool observer = IsObserver();
         bool canCreate = capitalId >= 0 && !observer;
         bool capitalFull = canCreate
-            && map.CountOwnArmies(capitalId, nation) >= GameManager.MaxArmiesPerRegion;
+            && !map.RegionHasRoom(capitalId, nation, (int)_soldierSlider.Value);
 
         int gold = GameManager.Instance.Gold.GetValueOrDefault(nation, 0);
         _goldLabel.Text = god ? "∞ (бог)" : gold.ToString();
@@ -859,7 +859,7 @@ public partial class SideTabs : CanvasLayer
         else if (capitalFull)
         {
             _createArmyBtn.Disabled = true;
-            _createArmyBtn.Text = $"Клетка заполнена ({GameManager.MaxArmiesPerRegion}/{GameManager.MaxArmiesPerRegion})";
+            _createArmyBtn.Text = $"Клетка заполнена ({map.CountOwnArmies(capitalId, nation)}/{GameManager.MaxArmiesPerRegion}, {map.CountOwnSoldiers(capitalId, nation)}/{GameManager.MaxSoldiersPerRegion})";
         }
         else if (god)
         {

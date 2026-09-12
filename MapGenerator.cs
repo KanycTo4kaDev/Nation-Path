@@ -271,9 +271,9 @@ public partial class MapGenerator : Node2D
                 }
 
                 var enemy = GetEnemyArmyInRegion(nextRegionId, army.PlayerId);
-                // Лимит: не больше MaxArmiesPerRegion своих на клетке.
-                // Упрётся — приказ снимается (через finishedIds: словарь правится вне итерации).
-                if (enemy == null && CountOwnArmies(nextRegionId, army.PlayerId) >= GameManager.MaxArmiesPerRegion)
+                // Лимит: не больше MaxArmiesPerRegion своих и MaxSoldiersPerRegion
+                // солдат на клетке. Упрётся — приказ снимается (через finishedIds).
+                if (enemy == null && !RegionHasRoom(nextRegionId, army.PlayerId, army.Soldiers))
                 {
                     GD.Print($"Армия #{army.Id}: клетка {nextRegion.RegionName} заполнена!");
                     finishedIds.Add(armyId);
@@ -368,7 +368,9 @@ public partial class MapGenerator : Node2D
                 UpdateArmyPositions(nextRegionId);
                 UpdateArmyPositions(prevRegionId);
 
-                if (nextRegion.OwnerId != army.PlayerId)
+                if (nextRegion.OwnerId != army.PlayerId
+                    && (nextRegion.OwnerId < 0
+                        || GameManager.GetRelation(army.PlayerId, nextRegion.OwnerId) == RelationState.War))
                 {
                     nextRegion.OwnerId = army.PlayerId;
                     nextRegion.OwningNation = GetNationById(army.PlayerId);
@@ -700,13 +702,13 @@ public partial class MapGenerator : Node2D
         int foundId = -1;
         // Предпочитаем свои клетки без вражеских армий, чтобы не прыгнуть
         // в клетку наступающего (иначе два врага на клетке без боя).
-        // Полные клетки (лимит своих) пропускаем.
+        // Полные клетки (лимит своих армий/солдат) пропускаем.
         foreach (int nId in current.Neighbors)
         {
             var region = GetRegionById(nId);
             if (region != null && region.OwnerId == army.PlayerId
                 && GetEnemyArmyInRegion(nId, army.PlayerId) == null
-                && CountOwnArmies(nId, army.PlayerId) < GameManager.MaxArmiesPerRegion)
+                && RegionHasRoom(nId, army.PlayerId, army.Soldiers))
             {
                 foundId = nId;
                 break;
@@ -718,7 +720,7 @@ public partial class MapGenerator : Node2D
             {
                 var region = GetRegionById(nId);
                 if (region != null && region.OwnerId == army.PlayerId
-                    && CountOwnArmies(nId, army.PlayerId) < GameManager.MaxArmiesPerRegion)
+                    && RegionHasRoom(nId, army.PlayerId, army.Soldiers))
                 {
                     foundId = nId;
                     break;
@@ -1178,7 +1180,7 @@ public partial class MapGenerator : Node2D
         if (!_capitalRegions.ContainsKey(playerId)) return false;
         if (_capitalRegions[playerId] != regionId) return false;
 
-        if (CountOwnArmies(regionId, playerId) >= GameManager.MaxArmiesPerRegion) return false;
+        if (!RegionHasRoom(regionId, playerId, soldiers)) return false;
         if (!god && !GameManager.CanRecruit(playerId, type)) return false;
 
         int armyCount = GetArmiesOfNation(playerId).Count;
@@ -1212,7 +1214,7 @@ public partial class MapGenerator : Node2D
         if (playerId < 0) return;
         if (!System.Enum.IsDefined(typeof(UnitType), type)) return;
         if (!GameManager.CanRecruit(playerId, type)) return;
-        if (CountOwnArmies(regionId, playerId) >= GameManager.MaxArmiesPerRegion) return;
+        if (!RegionHasRoom(regionId, playerId, soldiers)) return;
 
         int armyCount = GetArmiesOfNation(playerId).Count;
         int cost = GameManager.GetArmyCost(soldiers, type, armyCount, playerId);
@@ -2571,6 +2573,28 @@ public partial class MapGenerator : Node2D
                 count++;
         }
         return count;
+    }
+
+    public int CountOwnSoldiers(int regionId, int playerId)
+    {
+        int total = 0;
+        foreach (var army in _armies)
+        {
+            if (!IsInstanceValid(army)) continue;
+            if (army.RegionId == regionId && army.PlayerId == playerId)
+                total += army.Soldiers;
+        }
+        return total;
+    }
+
+    // Влезет ли армия в клетку с учётом обоих лимитов (свои).
+    public bool RegionHasRoom(int regionId, int playerId, int soldiers)
+    {
+        if (CountOwnArmies(regionId, playerId) >= GameManager.MaxArmiesPerRegion)
+            return false;
+        if (CountOwnSoldiers(regionId, playerId) + soldiers > GameManager.MaxSoldiersPerRegion)
+            return false;
+        return true;
     }
 
     public List<int> FindPathTo(int fromId, int toId)

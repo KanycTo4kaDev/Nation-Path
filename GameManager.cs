@@ -220,7 +220,8 @@ public partial class GameManager : Node
     public const int ArmyCostPer10 = 20;
     public const int MinSoldiers = 10;
     public const int MaxSoldiers = 100;
-    public const int MaxArmiesPerRegion = 3;
+    public const int MaxArmiesPerRegion = 2;
+    public const int MaxSoldiersPerRegion = 200;
 
     public static int GetArmyCost(int soldiers)
     {
